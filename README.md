@@ -1,75 +1,88 @@
-# [Start Bootstrap - SB Admin](https://startbootstrap.com/template/sb-admin/)
+# pipeline_runner.py
 
-[SB Admin](https://startbootstrap.com/template/sb-admin/) is an open source, admin dashboard template for [Bootstrap](https://getbootstrap.com/) created by [Start Bootstrap](https://startbootstrap.com/).
+import pandas as pd
+import os
+import re
+from config_loader import load_configurations # Assuming config_loader.py is in the same directory
+from typing import Dict, Any
+  
+# Define a global variable that will hold loaded configuration instance
+global config
 
-## Preview
+# Load the configuration manager
+config = load_configurations(
+    pipeline_path="/Users/atul/python-scripts/xlsx_to_bq/configurations/pipeline_config.yaml", # Assume this file is local for this example
+)
 
-[![SB Admin Preview](https://assets.startbootstrap.com/img/screenshots/templates/sb-admin.png)](https://startbootstrap.github.io/startbootstrap-sb-admin/)
+def get_file_list(source_type: str, incoming_area: str, supported_formats: list) -> list:
+    """
+    Simulates fetching a list of files from either a local directory or GCS.
+    For this example, we mock a list of files that match your regex.
+    """
+    
+def run_read_and_filter(filename: str, file_config: Dict[str, Any]) -> pd.DataFrame | None:
+    """
+    STEP 1: Reads the source file (XLSX or CSV), applies column mapping,
+    and returns a clean DataFrame.
+    """
+    
+def run_load_to_landing(df: pd.DataFrame, landing_step_config: Dict[str, Any]):
+    """
+    STEP 2: Loads the processed DataFrame into the BigQuery landing table.
+    """
+    
 
-**[View Live Preview](https://startbootstrap.github.io/startbootstrap-sb-admin/)**
+# --- Main Execution Block ---
 
-## Status
+def main():
+    """
+    Main function to run the data ingestion pipeline.
+    """
+        
+    # 1. Get the configuration steps
+    read_step_config = next(s for s in config.pipeline_steps if s['step_name'] == 'read_and_filter')
+    landing_step_config = next(s for s in config.pipeline_steps if s['step_name'] == 'load_to_landing')
+    
+    if not (read_step_config['enabled'] and landing_step_config['enabled']):
+        print("INFO: Pipeline steps are disabled in config. Exiting.")
+        return
 
-[![GitHub license](https://img.shields.io/badge/license-MIT-blue.svg)](https://raw.githubusercontent.com/StartBootstrap/startbootstrap-sb-admin/master/LICENSE)
-[![npm version](https://img.shields.io/npm/v/startbootstrap-sb-admin.svg)](https://www.npmjs.com/package/startbootstrap-sb-admin)
-[![dependencies Status](https://david-dm.org/StartBootstrap/startbootstrap-sb-admin/status.svg)](https://david-dm.org/StartBootstrap/startbootstrap-sb-admin)
-[![devDependencies Status](https://david-dm.org/StartBootstrap/startbootstrap-sb-admin/dev-status.svg)](https://david-dm.org/StartBootstrap/startbootstrap-sb-admin?type=dev)
+    # 2. Get list of files to process (Simulation)
+    source_type = config.global_settings['source_type']
+    incoming_area = config.global_settings['incoming_area']
+    supported_formats = read_step_config['parameters']['supported_formats']
+    
+    files_to_process = get_file_list(source_type, incoming_area, supported_formats)
+    
+    # 3. Process each file end-to-end
+    all_processed_data = []
+    
+    for filename in files_to_process:
+        # Get the specific configuration for this file
+        file_config = config.get_config_for_file(filename)
+        
+        if file_config:
+            # --- STEP 1: READ, FILTER, AND RENAME ---
+            transformed_df = run_read_and_filter(filename, file_config)
+            
+            if transformed_df is not None and not transformed_df.empty:
+                all_processed_data.append(transformed_df)
+        else:
+            print(f"INFO: Skipping file {filename} as no configuration match was found.")
 
-## Download and Installation
+    if not all_processed_data:
+        print("\nPipeline finished: No data was successfully processed.")
+        return
 
-To begin using this template, choose one of the following options to get started:
+    # 4. Concatenate all processed dataframes for bulk loading
+    final_df = pd.concat(all_processed_data, ignore_index=True)
+    print(f"\n--- Consolidated {len(final_df)} rows for BigQuery Load ---")
+    
+    # --- STEP 2: LOAD TO LANDING DATASET ---
+    run_load_to_landing(final_df, landing_step_config)
+    
+    print("\n--- Pipeline Run Complete ---")
 
-* [Download the latest release on Start Bootstrap](https://startbootstrap.com/template/sb-admin/)
-* Install via npm: `npm i startbootstrap-sb-admin`
-* Clone the repo: `git clone https://github.com/StartBootstrap/startbootstrap-sb-admin.git`
-* [Fork, Clone, or Download on GitHub](https://github.com/StartBootstrap/startbootstrap-sb-admin)
 
-## Usage
-
-### Basic Usage
-
-After downloading, simply edit the HTML and CSS files included with `dist` directory. These are the only files you need to worry about, you can ignore everything else! To preview the changes you make to the code, you can open the `index.html` file in your web browser.
-
-### Advanced Usage
-
-Clone the source files of the theme and navigate into the theme's root directory. Run `npm install` and then run `npm start` which will open up a preview of the template in your default browser, watch for changes to core template files, and live reload the browser when changes are saved. You can view the `package.json` file to see which scripts are included.
-
-#### npm Scripts
-
-* `npm run build` builds the project - this builds assets, HTML, JS, and CSS into `dist`
-* `npm run build:assets` copies the files in the `src/assets/` directory into `dist`
-* `npm run build:pug` compiles the Pug located in the `src/pug/` directory into `dist`
-* `npm run build:scripts` brings the `src/js/scripts.js` file into `dist`
-* `npm run build:scss` compiles the SCSS files located in the `src/scss/` directory into `dist`
-* `npm run clean` deletes the `dist` directory to prepare for rebuilding the project
-* `npm run start:debug` runs the project in debug mode
-* `npm start` or `npm run start` runs the project, launches a live preview in your default browser, and watches for changes made to files in `src`
-
-You must have npm installed in order to use this build environment.
-
-## Bugs and Issues
-
-Have a bug or an issue with this template? [Open a new issue](https://github.com/StartBootstrap/startbootstrap-sb-admin/issues) here on GitHub or leave a comment on the [template overview page at Start Bootstrap](https://startbootstrap.com/template/sb-admin/).
-
-## Custom Builds
-
-You can hire Start Bootstrap to create a custom build of any template, or create something from scratch using Bootstrap. For more information, visit the **[custom design services page](https://startbootstrap.com/bootstrap-design-services/)**.
-
-## About
-
-Start Bootstrap is an open source library of free Bootstrap templates and themes. All of the free templates and themes on Start Bootstrap are released under the MIT license, which means you can use them for any purpose, even for commercial projects.
-
-* <https://startbootstrap.com>
-* <https://twitter.com/SBootstrap>
-
-Start Bootstrap was created by and is maintained by **[David Miller](https://davidmiller.io/)**.
-
-* <https://davidmiller.io>
-* <https://twitter.com/davidmillerhere>
-* <https://github.com/davidtmiller>
-
-Start Bootstrap is based on the [Bootstrap](https://getbootstrap.com/) framework created by [Mark Otto](https://twitter.com/mdo) and [Jacob Thorton](https://twitter.com/fat).
-
-## Copyright and License
-
-Copyright 2013-2021 Start Bootstrap LLC. Code released under the [MIT](https://github.com/StartBootstrap/startbootstrap-sb-admin/blob/master/LICENSE) license.
+if __name__ == "__main__":
+    main()
