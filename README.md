@@ -1,75 +1,173 @@
-# [Start Bootstrap - SB Admin](https://startbootstrap.com/template/sb-admin/)
+version: "3.0"
 
-[SB Admin](https://startbootstrap.com/template/sb-admin/) is an open source, admin dashboard template for [Bootstrap](https://getbootstrap.com/) created by [Start Bootstrap](https://startbootstrap.com/).
+# ==========================================
+# TIER 1: SYSTEM GLOBAL DEFAULTS
+# ==========================================
+global_defaults:
+  parsing:
+    data_row_starts: 1
+    data_row_ends: null
+    has_header_in_range: true
+    is_header_missing: false
+    ordered_header: []
+  destination:
+    bq_dataset: "landing_zone"
+    write_disposition: "WRITE_TRUNCATE"
 
-## Preview
+# ==========================================
+# TIER 2: FILE CONFIGURATIONS
+# ==========================================
+ingestion_jobs:
 
-[![SB Admin Preview](https://assets.startbootstrap.com/img/screenshots/templates/sb-admin.png)](https://startbootstrap.github.io/startbootstrap-sb-admin/)
+  # --------------------------------------------------------
+  # JOB A: Monthly Sales (REGEX Match)
+  # Matches files like: "sales_2024_01.xlsx", "sales_v2.xlsx"
+  # --------------------------------------------------------
+  - job_name: "sales_ingestion"
+    
+    # NEW: File Selector Block
+    file_selector:
+      pattern: "^sales_.*\.xlsx$"
+      type: "regex"  # Options: 'regex' or 'exact'
 
-**[View Live Preview](https://startbootstrap.github.io/startbootstrap-sb-admin/)**
+    # File-Level Defaults (Tier 2)
+    file_defaults:
+      bq_dataset: "sales_mart" 
 
-## Status
+    # Sheet-Level Rules (Tier 3)
+    sheet_rules:
+      - selector: "Summary"
+        selector_type: "exact"
+        bq_table_name: "monthly_summary"
+        parsing:
+          data_row_starts: 5
+          column_range: "A:F"
 
-[![GitHub license](https://img.shields.io/badge/license-MIT-blue.svg)](https://raw.githubusercontent.com/StartBootstrap/startbootstrap-sb-admin/master/LICENSE)
-[![npm version](https://img.shields.io/npm/v/startbootstrap-sb-admin.svg)](https://www.npmjs.com/package/startbootstrap-sb-admin)
-[![dependencies Status](https://david-dm.org/StartBootstrap/startbootstrap-sb-admin/status.svg)](https://david-dm.org/StartBootstrap/startbootstrap-sb-admin)
-[![devDependencies Status](https://david-dm.org/StartBootstrap/startbootstrap-sb-admin/dev-status.svg)](https://david-dm.org/StartBootstrap/startbootstrap-sb-admin?type=dev)
+  # --------------------------------------------------------
+  # JOB B: Master Mapping File (EXACT Match)
+  # Matches ONLY: "master_product_list.xlsx"
+  # --------------------------------------------------------
+  - job_name: "master_data"
+    
+    file_selector:
+      pattern: "master_product_list.xlsx"
+      type: "exact"
 
-## Download and Installation
+    file_defaults:
+      bq_dataset: "ref_data"
+      parsing:
+        has_header_in_range: true
 
-To begin using this template, choose one of the following options to get started:
+    sheet_rules:
+      # If the file has sheets like "US_Codes", "EU_Codes"
+      - selector: ".*_Codes" 
+        selector_type: "regex"
+        bq_table_name: "geo_codes"
 
-* [Download the latest release on Start Bootstrap](https://startbootstrap.com/template/sb-admin/)
-* Install via npm: `npm i startbootstrap-sb-admin`
-* Clone the repo: `git clone https://github.com/StartBootstrap/startbootstrap-sb-admin.git`
-* [Fork, Clone, or Download on GitHub](https://github.com/StartBootstrap/startbootstrap-sb-admin)
 
-## Usage
 
-### Basic Usage
+import yaml
+import re
+import os
 
-After downloading, simply edit the HTML and CSS files included with `dist` directory. These are the only files you need to worry about, you can ignore everything else! To preview the changes you make to the code, you can open the `index.html` file in your web browser.
+class ConfigEngine:
+    def __init__(self, config_path):
+        with open(config_path, 'r') as f:
+            self.full_config = yaml.safe_load(f)
+        
+        self.system_globals = self.full_config.get('global_defaults', {})
+        self.jobs = self.full_config.get('ingestion_jobs', [])
 
-### Advanced Usage
+    def _merge_configs(self, base, override):
+        """
+        Deep merges two configuration dictionaries (Base + Override).
+        Logic: If key exists in override, use it. Otherwise keep base.
+        Handles nested dictionaries (like 'parsing' or 'destination').
+        """
+        merged = base.copy()
+        for key, value in override.items():
+            if isinstance(value, dict) and key in merged:
+                merged[key] = self._merge_configs(merged[key], value)
+            else:
+                merged[key] = value
+        return merged
 
-Clone the source files of the theme and navigate into the theme's root directory. Run `npm install` and then run `npm start` which will open up a preview of the template in your default browser, watch for changes to core template files, and live reload the browser when changes are saved. You can view the `package.json` file to see which scripts are included.
+    def _is_match(self, target_string, selector_config):
+        """
+        Generic matcher for both Files and Sheets.
+        """
+        pattern = selector_config.get('pattern') or selector_config.get('selector') # Handle naming diffs
+        match_type = selector_config.get('type') or selector_config.get('selector_type', 'exact')
 
-#### npm Scripts
+        if match_type == 'regex':
+            return bool(re.search(pattern, target_string))
+        elif match_type == 'exact':
+            return target_string == pattern
+        return False
 
-* `npm run build` builds the project - this builds assets, HTML, JS, and CSS into `dist`
-* `npm run build:assets` copies the files in the `src/assets/` directory into `dist`
-* `npm run build:pug` compiles the Pug located in the `src/pug/` directory into `dist`
-* `npm run build:scripts` brings the `src/js/scripts.js` file into `dist`
-* `npm run build:scss` compiles the SCSS files located in the `src/scss/` directory into `dist`
-* `npm run clean` deletes the `dist` directory to prepare for rebuilding the project
-* `npm run start:debug` runs the project in debug mode
-* `npm start` or `npm run start` runs the project, launches a live preview in your default browser, and watches for changes made to files in `src`
+    def get_job_for_file(self, filename):
+        """
+        Iterates through all jobs to find which one matches this filename.
+        Returns the Job Config if found, else None.
+        """
+        for job in self.jobs:
+            selector = job.get('file_selector', {})
+            if self._is_match(filename, selector):
+                return job
+        return None
 
-You must have npm installed in order to use this build environment.
+    def get_final_config(self, filename, sheet_name):
+        """
+        THE MAGIC FUNCTION:
+        Returns the final merged configuration for a specific Sheet in a specific File.
+        """
+        # 1. Find the Job (File match)
+        job = self.get_job_for_file(filename)
+        if not job:
+            return None # File is not configured to be ingested
 
-## Bugs and Issues
+        # 2. Start with System Globals (Tier 1)
+        current_config = self.system_globals.copy()
 
-Have a bug or an issue with this template? [Open a new issue](https://github.com/StartBootstrap/startbootstrap-sb-admin/issues) here on GitHub or leave a comment on the [template overview page at Start Bootstrap](https://startbootstrap.com/template/sb-admin/).
+        # 3. Merge File Defaults (Tier 2)
+        file_defaults = job.get('file_defaults', {})
+        current_config = self._merge_configs(current_config, file_defaults)
 
-## Custom Builds
+        # 4. Find Sheet Rule (Tier 3)
+        sheet_rules = job.get('sheet_rules', [])
+        sheet_specific_config = {}
+        
+        matched_rule = None
+        for rule in sheet_rules:
+            # We treat the rule itself as the selector config
+            if self._is_match(sheet_name, rule):
+                matched_rule = rule
+                # We stop at the FIRST match (priority)
+                break
+        
+        # 5. Merge Sheet Overrides if found
+        if matched_rule:
+            # Add table name if it exists in the rule
+            if 'bq_table_name' in matched_rule:
+                if 'destination' not in current_config: current_config['destination'] = {}
+                current_config['destination']['bq_table_name'] = matched_rule['bq_table_name']
 
-You can hire Start Bootstrap to create a custom build of any template, or create something from scratch using Bootstrap. For more information, visit the **[custom design services page](https://startbootstrap.com/bootstrap-design-services/)**.
+            # Merge parsing/destination overrides
+            sheet_specific_config = matched_rule.get('parsing', {})
+            if sheet_specific_config:
+                current_config['parsing'] = self._merge_configs(current_config.get('parsing', {}), sheet_specific_config)
 
-## About
+        # Return the final flattened config ready for the converter
+        return current_config
 
-Start Bootstrap is an open source library of free Bootstrap templates and themes. All of the free templates and themes on Start Bootstrap are released under the MIT license, which means you can use them for any purpose, even for commercial projects.
+# --- USAGE EXAMPLE ---
+# engine = ConfigEngine("ingestion_config.yaml")
 
-* <https://startbootstrap.com>
-* <https://twitter.com/SBootstrap>
+# # Scenario: We are processing 'sales_2024.xlsx', sheet 'Summary'
+# config = engine.get_final_config("sales_2024.xlsx", "Summary")
 
-Start Bootstrap was created by and is maintained by **[David Miller](https://davidmiller.io/)**.
+# print(f"Row Start: {config['parsing']['data_row_starts']}") 
+# # Output: 5 (Inherited from sheet rule)
 
-* <https://davidmiller.io>
-* <https://twitter.com/davidmillerhere>
-* <https://github.com/davidtmiller>
-
-Start Bootstrap is based on the [Bootstrap](https://getbootstrap.com/) framework created by [Mark Otto](https://twitter.com/mdo) and [Jacob Thorton](https://twitter.com/fat).
-
-## Copyright and License
-
-Copyright 2013-2021 Start Bootstrap LLC. Code released under the [MIT](https://github.com/StartBootstrap/startbootstrap-sb-admin/blob/master/LICENSE) license.
+# print(f"Dataset: {config['destination']['bq_dataset']}")
+# # Output: sales_mart (Inherited from file default)
