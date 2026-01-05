@@ -1,173 +1,173 @@
-version: "3.0"
 
-# ==========================================
-# TIER 1: SYSTEM GLOBAL DEFAULTS
-# ==========================================
-global_defaults:
-  parsing:
-    data_row_starts: 1
-    data_row_ends: null
-    has_header_in_range: true
-    is_header_missing: false
-    ordered_header: []
-  destination:
-    bq_dataset: "landing_zone"
-    write_disposition: "WRITE_TRUNCATE"
 
-# ==========================================
-# TIER 2: FILE CONFIGURATIONS
-# ==========================================
-ingestion_jobs:
+# =============================================================================
+# 1. GLOBAL DEFAULTS
+# =============================================================================
+global_config:
+  bq_project_id: "your-gcp-project-id"
+  bq_dataset_id: "raw_landing_zone"
+  
+  # Metadata columns to append to every table for lineage
+  metadata_columns:
+    ingestion_timestamp: "_ingestion_ts"
+    source_filename: "_source_file"
+    sheet_name: "_sheet_name"
 
-  # --------------------------------------------------------
-  # JOB A: Monthly Sales (REGEX Match)
-  # Matches files like: "sales_2024_01.xlsx", "sales_v2.xlsx"
-  # --------------------------------------------------------
-  - job_name: "sales_ingestion"
+  # Default Loading Strategy
+  write_mode: "WRITE_TRUNCATE" 
+
+  # Layer 1: Global Defaults (Lowest Priority)
+  default_parsing_rules:
+    header_row: 0          # 0-indexed (Row 1 in Excel)
+    data_start: 1          # 0-indexed (Row 2 in Excel)
+    trim_whitespace: true
+    treat_as_null: ["N/A", "NULL", "-", "", "nan"]
     
-    # NEW: File Selector Block
-    file_selector:
-      pattern: "^sales_.*\.xlsx$"
-      type: "regex"  # Options: 'regex' or 'exact'
+    # Critical for Excel: Force specific columns to read as String to prevent
+    # losing leading zeros (e.g., zip codes "00123" -> 123)
+    # This is a global fallback; specific jobs usually override this.
+    force_string_cols: [] 
 
-    # File-Level Defaults (Tier 2)
-    file_defaults:
-      bq_dataset: "sales_mart" 
+# =============================================================================
+# 2. INGESTION JOBS
+# =============================================================================
+jobs:
+  - job_id: "inventory_master_upload"
+    description: "Inventory file processing"
 
-    # Sheet-Level Rules (Tier 3)
-    sheet_rules:
-      - selector: "Summary"
-        selector_type: "exact"
-        bq_table_name: "monthly_summary"
-        parsing:
-          data_row_starts: 5
-          column_range: "A:F"
+    gcs_input:
+      bucket: "landing-zone-bucket" # Added explicit bucket
+      file_selector:
+        match_type: "regex"
+        pattern: "^inventory/stock_levels_v.*\\.xlsx$"
+      
+      # Action to take on source file after success
+      post_processing:
+        action: "archive"  # Options: archive, delete, move
+        archive_path: "inventory/archive/"
 
-  # --------------------------------------------------------
-  # JOB B: Master Mapping File (EXACT Match)
-  # Matches ONLY: "master_product_list.xlsx"
-  # --------------------------------------------------------
-  - job_name: "master_data"
-    
-    file_selector:
-      pattern: "master_product_list.xlsx"
-      type: "exact"
+    # Layer 2: Job-Level Rules (Middle Priority)
+    job_parsing_rules:
+      header_row: 0
+      data_start: 1
+      is_header_missing: false
+      # Ensure SKUs are always treated as strings to keep formatting
+      force_string_cols: ["sku_id", "material_code"] 
 
-    file_defaults:
-      bq_dataset: "ref_data"
-      parsing:
-        has_header_in_range: true
-
-    sheet_rules:
-      # If the file has sheets like "US_Codes", "EU_Codes"
-      - selector: ".*_Codes" 
-        selector_type: "regex"
-        bq_table_name: "geo_codes"
-
-
-
-import yaml
-import re
-import os
-
-class ConfigEngine:
-    def __init__(self, config_path):
-        with open(config_path, 'r') as f:
-            self.full_config = yaml.safe_load(f)
+    # List of Sheets to process
+    sheets:
+      # Scenario A: Standard Sheet (Inherits Job Rules)
+      - sheet_identifier: "US_Stock" # Renamed from 'sheet_name' to allow flexibility
+        identifier_type: "name"      # Options: 'name', 'index', 'regex'
+        target_table: "inv_us_stock"
         
-        self.system_globals = self.full_config.get('global_defaults', {})
-        self.jobs = self.full_config.get('ingestion_jobs', [])
+        # Schema Enforcement: Explicitly define schema to prevent drift
+        schema_config:
+          mode: "explicit" # Options: 'auto_detect', 'explicit'
+          fields:
+            - {name: "sku_id", type: "STRING", mode: "REQUIRED"}
+            - {name: "qty", type: "INTEGER"}
+            - {name: "last_updated", type: "DATE"}
 
-    def _merge_configs(self, base, override):
-        """
-        Deep merges two configuration dictionaries (Base + Override).
-        Logic: If key exists in override, use it. Otherwise keep base.
-        Handles nested dictionaries (like 'parsing' or 'destination').
-        """
-        merged = base.copy()
-        for key, value in override.items():
-            if isinstance(value, dict) and key in merged:
-                merged[key] = self._merge_configs(merged[key], value)
-            else:
-                merged[key] = value
-        return merged
-
-    def _is_match(self, target_string, selector_config):
-        """
-        Generic matcher for both Files and Sheets.
-        """
-        pattern = selector_config.get('pattern') or selector_config.get('selector') # Handle naming diffs
-        match_type = selector_config.get('type') or selector_config.get('selector_type', 'exact')
-
-        if match_type == 'regex':
-            return bool(re.search(pattern, target_string))
-        elif match_type == 'exact':
-            return target_string == pattern
-        return False
-
-    def get_job_for_file(self, filename):
-        """
-        Iterates through all jobs to find which one matches this filename.
-        Returns the Job Config if found, else None.
-        """
-        for job in self.jobs:
-            selector = job.get('file_selector', {})
-            if self._is_match(filename, selector):
-                return job
-        return None
-
-    def get_final_config(self, filename, sheet_name):
-        """
-        THE MAGIC FUNCTION:
-        Returns the final merged configuration for a specific Sheet in a specific File.
-        """
-        # 1. Find the Job (File match)
-        job = self.get_job_for_file(filename)
-        if not job:
-            return None # File is not configured to be ingested
-
-        # 2. Start with System Globals (Tier 1)
-        current_config = self.system_globals.copy()
-
-        # 3. Merge File Defaults (Tier 2)
-        file_defaults = job.get('file_defaults', {})
-        current_config = self._merge_configs(current_config, file_defaults)
-
-        # 4. Find Sheet Rule (Tier 3)
-        sheet_rules = job.get('sheet_rules', [])
-        sheet_specific_config = {}
+      # Scenario B: Complex Sheet (Overrides Job Rules)
+      - sheet_identifier: "APAC_Legacy_Data"
+        identifier_type: "name"
+        target_table: "inv_apac_stock"
         
-        matched_rule = None
-        for rule in sheet_rules:
-            # We treat the rule itself as the selector config
-            if self._is_match(sheet_name, rule):
-                matched_rule = rule
-                # We stop at the FIRST match (priority)
-                break
+        # Layer 3: Sheet-Level Rules (Highest Priority)
+        sheet_parsing_rules:
+          is_header_missing: true
+          header_row: null           # Explicitly nullify since we provide manual headers
+          data_start: 0
+          data_end: 500              
+          # Renaming columns from Excel headers (A, B, C...) to DB friendly names
+          ordered_header: ["sku_id", "qty", "location_code", "manager"]
+          usecols: "A:D"             # Pandas standard is 'usecols', clearer than 'col_range'
+          skip_footer: 2
+
+
+
+
+
+
+
+
+
+
+import json
+from config_manager import config
+
+def print_separator(char="=", length=80):
+    print(char * length)
+
+def inspect_all_configs():
+    """
+    Loops through all jobs defined in the YAML and prints the 
+    fully resolved configuration for each sheet.
+    """
+    print("STARTING CONFIGURATION INSPECTION...")
+    print(f"Global Project ID: {config.project_id}")
+    print(f"Global Metadata Columns: {config.metadata_cols}")
+    print_separator()
+
+    # Access the raw list of jobs from the loaded config data
+    # We use the internal _config_data here to discover what jobs exist
+    all_jobs = config._config_data.get('jobs', [])
+
+    if not all_jobs:
+        print("No jobs found in configuration!")
+        return
+
+    for job_entry in all_jobs:
+        job_id = job_entry.get('job_id')
         
-        # 5. Merge Sheet Overrides if found
-        if matched_rule:
-            # Add table name if it exists in the rule
-            if 'bq_table_name' in matched_rule:
-                if 'destination' not in current_config: current_config['destination'] = {}
-                current_config['destination']['bq_table_name'] = matched_rule['bq_table_name']
+        # 1. Resolve Job Context (Bucket, Pattern, etc.)
+        try:
+            job_ctx = config.get_job_config(job_id)
+        except ValueError as e:
+            print(f"!! ERROR loading Job {job_id}: {e}")
+            continue
 
-            # Merge parsing/destination overrides
-            sheet_specific_config = matched_rule.get('parsing', {})
-            if sheet_specific_config:
-                current_config['parsing'] = self._merge_configs(current_config.get('parsing', {}), sheet_specific_config)
+        print(f"\nJOB ID: {job_id}")
+        print(f"Description: {job_ctx['description']}")
+        print(f"Source Bucket: '{job_ctx['bucket']}' (Resolved)")
+        print(f"File Pattern:  '{job_ctx['file_selector']['pattern']}'")
+        print(f"Post-Process:  {job_ctx['post_processing'].get('action', 'None')}")
+        print("-" * 40)
 
-        # Return the final flattened config ready for the converter
-        return current_config
+        # 2. Loop through all sheets in this job
+        sheets = job_entry.get('sheets', [])
+        
+        for sheet in sheets:
+            sheet_identifier = sheet.get('sheet_identifier')
+            
+            # 3. Resolve Sheet Context (Parsing Rules, Schema, Target)
+            try:
+                sheet_ctx = config.get_sheet_config(job_id, sheet_identifier)
+                
+                print(f"  SHEET: {sheet_identifier}")
+                print(f"  -> Target: {sheet_ctx['target_dataset']}.{sheet_ctx['target_table']}")
+                
+                # specific schema check
+                if sheet_ctx['schema_config']:
+                    print(f"  -> Schema Mode: {sheet_ctx['schema_config']['mode']} (Explicit schema defined)")
+                else:
+                    print(f"  -> Schema Mode: Auto-Detect")
 
-# --- USAGE EXAMPLE ---
-# engine = ConfigEngine("ingestion_config.yaml")
+                print("  -> Effective Parsing Rules (Merged):")
+                
+                # Pretty print the dictionary of rules
+                rules_json = json.dumps(sheet_ctx['parsing_rules'], indent=6)
+                print(rules_json)
+                print("") # Empty line for spacing
 
-# # Scenario: We are processing 'sales_2024.xlsx', sheet 'Summary'
-# config = engine.get_final_config("sales_2024.xlsx", "Summary")
+            except ValueError as e:
+                print(f"  !! ERROR loading Sheet {sheet_identifier}: {e}")
 
-# print(f"Row Start: {config['parsing']['data_row_starts']}") 
-# # Output: 5 (Inherited from sheet rule)
+        print_separator("-")
 
-# print(f"Dataset: {config['destination']['bq_dataset']}")
-# # Output: sales_mart (Inherited from file default)
+if __name__ == "__main__":
+    try:
+        inspect_all_configs()
+    except Exception as e:
+        print(f"Critical Error: {e}")
