@@ -171,3 +171,176 @@ if __name__ == "__main__":
         inspect_all_configs()
     except Exception as e:
         print(f"Critical Error: {e}")
+
+
+
+
+
+
+import yaml
+import os
+import logging
+from typing import Dict, Any, List, Optional, Union
+from pathlib import Path
+
+# Setup basic logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+config = None
+
+class ConfigManager:
+    _instance = None
+    _config_data = {}
+    _job_index = {}
+
+    def __new__(cls, config_path: str = "./configuration/ingestion_config.yaml"):
+        """
+        Singleton Pattern: Ensures config is loaded only once per runtime.
+        """
+        if cls._instance is None:
+            cls._instance = super(ConfigManager, cls).__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
+
+    def __init__(self, config_path: str = "configurations/ingestion_config.yaml"):
+        if self._initialized:
+            return
+            
+        base_dir = os.path.dirname(os.path.abspath(__file__))        
+        self.config_path = os.path.join(base_dir, config_path)
+        self.reload_config()
+        self._initialized = True
+
+    def reload_config(self):
+        """Loads or reloads the YAML configuration file."""
+        if not os.path.exists(self.config_path):
+            raise FileNotFoundError(f"Configuration file not found at: {self.config_path}")
+
+        try:
+            with open(self.config_path, 'r') as f:
+                self._config_data = yaml.safe_load(f)
+                
+            # Create an index for fast O(1) job lookups
+            self._job_index = {
+                job['job_id']: job 
+                for job in self._config_data.get('jobs', [])
+            }
+            logger.info(f"Configuration loaded successfully from {self.config_path}")
+            
+        except yaml.YAMLError as e:
+            logger.error(f"Failed to parse YAML: {e}")
+            raise
+
+    # =========================================================================
+    # 1. GLOBAL GETTERS
+    # =========================================================================
+    
+    @property
+    def project_id(self) -> str:
+        return self._config_data['global_config']['bq_project_id']
+
+    @property
+    def metadata_cols(self) -> Dict[str, str]:
+        return self._config_data['global_config'].get('metadata_columns', {})
+
+    def get_global_bucket(self) -> str:
+        return self._config_data['global_config'].get('bucket')
+
+    # =========================================================================
+    # 2. JOB CONTEXT (Bucket Resolution)
+    # =========================================================================
+
+    def get_job_config(self, job_id: str) -> Dict[str, Any]:
+        """
+        Retrieves job details and RESOLVES the bucket (Job > Global).
+        """
+        job = self._job_index.get(job_id)
+        if not job:
+            raise ValueError(f"Job ID '{job_id}' not found in configuration.")
+
+        # Resolve Bucket: Check Job specific input first, then Global default
+        job_specific_bucket = job.get('gcs_input', {}).get('bucket')
+        global_bucket = self.get_global_bucket()
+        
+        final_bucket = job_specific_bucket if job_specific_bucket else global_bucket
+
+        if not final_bucket:
+            raise ValueError(f"Bucket not defined for job '{job_id}' and no global default found.")
+
+        return {
+            "job_id": job_id,
+            "description": job.get("description"),
+            "bucket": final_bucket,
+            "file_selector": job.get("gcs_input", {}).get("file_selector"),
+            "post_processing": job.get("gcs_input", {}).get("post_processing", {}),
+            "target_defaults": job.get("target_defaults", {})
+        }
+
+    # =========================================================================
+    # 3. HIERARCHICAL PARSING RULES (The "Smart Merge")
+    # =========================================================================
+
+    def get_sheet_config(self, job_id: str, sheet_identifier: str) -> Dict[str, Any]:
+        """
+        Returns the FULL configuration for a specific sheet.
+        Merges: Global Rules -> Job Rules -> Sheet Rules
+        """
+        job = self._job_index.get(job_id)
+        if not job:
+            raise ValueError(f"Job ID '{job_id}' not found.")
+
+        # Find the specific sheet entry
+        sheet_entry = next((s for s in job.get('sheets', []) if s['sheet_identifier'] == sheet_identifier), None)
+        if not sheet_entry:
+            raise ValueError(f"Sheet '{sheet_identifier}' not found in job '{job_id}'.")
+
+        # --- MERGE LOGIC START ---
+        
+        # 1. Start with Global Defaults
+        final_rules = self._config_data['global_config'].get('default_parsing_rules', {}).copy()
+
+        # 2. Overlay Job Rules
+        job_rules = job.get('job_parsing_rules', {})
+        final_rules = self._smart_update(final_rules, job_rules)
+
+        # 3. Overlay Sheet Rules
+        sheet_rules = sheet_entry.get('sheet_parsing_rules', {})
+        final_rules = self._smart_update(final_rules, sheet_rules)
+        
+        # --- MERGE LOGIC END ---
+
+        # Resolve Target Table and Dataset
+        dataset = sheet_entry.get('dataset') or job.get('target_defaults', {}).get('dataset') or self._config_data['global_config']['bq_dataset_id']
+        
+        return {
+            "sheet_identifier": sheet_identifier,
+            "target_dataset": dataset,
+            "target_table": sheet_entry.get('target_table'),
+            "parsing_rules": final_rules,
+            "schema_config": sheet_entry.get('schema_config', None) # explicit schema if present
+        }
+
+    def _smart_update(self, base: Dict, override: Dict) -> Dict:
+        """
+        Helper to merge dictionaries. 
+        Note: For lists (like force_string_cols), this performs a UNION (Combine),
+        not a replacement. This ensures specific jobs don't accidentally lose global string rules.
+        """
+        result = base.copy()
+        for key, value in override.items():
+            # Special handling for 'force_string_cols' -> Union the lists
+            if key == "force_string_cols" and isinstance(value, list) and isinstance(result.get(key), list):
+                # Combine distinct values from both lists
+                result[key] = list(set(result[key]) | set(value))
+            else:
+                # Standard overwrite
+                result[key] = value
+        return result
+
+# Global Instance for easy import
+# Usage in other files: `from config_manager import config`
+try:
+    config = ConfigManager()
+except Exception as e:
+    logger.warning(f"Config auto-load failed (Ignore if running unit tests): {e}")
