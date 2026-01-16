@@ -1,75 +1,90 @@
-# [Start Bootstrap - SB Admin](https://startbootstrap.com/template/sb-admin/)
+# =============================================================================
+# EXCEL-TO-BIGQUERY INGESTION TEMPLATE
+# =============================================================================
+# This template defines how to parse Excel files and load them into BigQuery.
+# 
+# CONFIGURATION HIERARCHY (Priority):
+# 1. Sheet-Specific Rules (Highest - overrides everything)
+# 2. Job-Level Rules (Middle - overrides Global)
+# 3. Global Parsing Defaults (Lowest - fallback)
+# =============================================================================
 
-[SB Admin](https://startbootstrap.com/template/sb-admin/) is an open source, admin dashboard template for [Bootstrap](https://getbootstrap.com/) created by [Start Bootstrap](https://startbootstrap.com/).
+global_config:
+  gcp_project_id: "<GCP_PROJECT_ID>" # The target Google Cloud Project ID
+  
+  # Dataset destinations for the different layers of your Data Lake
+  bq_land_dataset_id: "<LANDING_DATASET_NAME>"   # Raw, un-casted data
+  bq_ingest_dataset_id: "<INGESTION_DATASET_NAME>" # Cleaned/Transformed data
+  
+  audit:
+    dataset: "<LANDING_DATASET_NAME>"
+    table: "<AUDIT_LOG_TABLE_NAME>" # Tracks file processing status, row counts, and timestamps
 
-## Preview
+  loading_defaults:
+    write_mode: "WRITE_TRUNCATE"     # WRITE_TRUNCATE (overwrites), WRITE_APPEND, or WRITE_EMPTY
+    continue_on_error: false         # If true, one failed row won't stop the whole job
+    skip_if_exists: false            # Set to true to avoid reprocessing the same file
 
-[![SB Admin Preview](https://assets.startbootstrap.com/img/screenshots/templates/sb-admin.png)](https://startbootstrap.github.io/startbootstrap-sb-admin/)
+  # Layer 1: Global Parsing Defaults
+  default_parsing_rules:
+    header_row: 0                    # 0-indexed row number where headers are found
+    data_start_row: 1                # 0-indexed row where actual data begins
+    trim_whitespace: true            # Removes leading/trailing spaces from strings
+    treat_as_null: ["N/A", "NULL", "nan"] # Values to be converted to SQL NULL
+    force_string_cols: []            # List column names to force as STRING (e.g., zip codes)
 
-**[View Live Preview](https://startbootstrap.github.io/startbootstrap-sb-admin/)**
+# =========================================================
+# INGESTION JOBS (Define multiple jobs in this list)
+# =========================================================
+jobs:
+  - job_id: "<UNIQUE_JOB_IDENTIFIER>"
+    description: "<BRIEF_DESCRIPTION_OF_THE_PIPELINE>"
+    
+    # 1. GCS INPUT SETTINGS: Where the files live
+    gcs_input:
+      bucket: "<GCS_BUCKET_NAME>"
+      
+    file_selector:
+      match_type: "regex"            # Use 'name' for direct match or 'regex' for patterns
+      prefix: "incoming/"            # Root folder to scan
+      supported_formats: "xlsx"
+      pattern: "<REGEX_PATTERN_OR_FILENAME>" # e.g., "sales_.*\.xlsx"
 
-## Status
+    # 2. POST PROCESSING: What happens after a successful load?
+    post_processing:
+      action: "archive"              # Options: 'archive', 'delete', or 'none'
+      archive_path: "processed_logs/" 
 
-[![GitHub license](https://img.shields.io/badge/license-MIT-blue.svg)](https://raw.githubusercontent.com/StartBootstrap/startbootstrap-sb-admin/master/LICENSE)
-[![npm version](https://img.shields.io/npm/v/startbootstrap-sb-admin.svg)](https://www.npmjs.com/package/startbootstrap-sb-admin)
-[![dependencies Status](https://david-dm.org/StartBootstrap/startbootstrap-sb-admin/status.svg)](https://david-dm.org/StartBootstrap/startbootstrap-sb-admin)
-[![devDependencies Status](https://david-dm.org/StartBootstrap/startbootstrap-sb-admin/dev-status.svg)](https://david-dm.org/StartBootstrap/startbootstrap-sb-admin?type=dev)
+    # Layer 2: Job-Level Rules (Overrides Global Defaults for this job only)
+    job_parsing_rules:
+      header_row: 0
+      data_start_row: 1
 
-## Download and Installation
+    # 3. SHEET CONFIGURATION: Define settings for specific tabs in the Excel file
+    sheets:
+      - sheet_identifier: 0          # Use the sheet index (0, 1, 2...) or the Sheet Name
+        identifier_type: "index"     # 'index' or 'name'
+        land_table: "<LANDING_TABLE_NAME>"
+        ingest_table: "<FINAL_INGEST_TABLE_NAME>"
 
-To begin using this template, choose one of the following options to get started:
+        # Layer 3: Sheet-Specific Rules (Highest Priority)
+        parsing_rules:
+          is_header_missing: false   # Set to true if Excel has no header row
+          group_header:              # Used for multi-row/complex headers
+            enabled: false
+            rows: [0]                # Which rows contain header info to be merged
+            separator: "_"           # Character to join multi-row headers
+            direction: "prefix"      # Add prefix or postfix during merge
+            ignore_labels: []        # Skip specific cells (e.g., "Report Date:")
+          skip_footer: 0             # Number of rows to ignore at the bottom of the sheet
+          # usecols: "A:M"           # Optional: Restrict parsing to specific Excel columns
 
-* [Download the latest release on Start Bootstrap](https://startbootstrap.com/template/sb-admin/)
-* Install via npm: `npm i startbootstrap-sb-admin`
-* Clone the repo: `git clone https://github.com/StartBootstrap/startbootstrap-sb-admin.git`
-* [Fork, Clone, or Download on GitHub](https://github.com/StartBootstrap/startbootstrap-sb-admin)
+        # Column Mapping: (Excel Header Name -> BigQuery Column Name)
+        column_mapping:
+          "<EXCEL_HEADER_NAME>": "<BQ_COLUMN_NAME>"
 
-## Usage
-
-### Basic Usage
-
-After downloading, simply edit the HTML and CSS files included with `dist` directory. These are the only files you need to worry about, you can ignore everything else! To preview the changes you make to the code, you can open the `index.html` file in your web browser.
-
-### Advanced Usage
-
-Clone the source files of the theme and navigate into the theme's root directory. Run `npm install` and then run `npm start` which will open up a preview of the template in your default browser, watch for changes to core template files, and live reload the browser when changes are saved. You can view the `package.json` file to see which scripts are included.
-
-#### npm Scripts
-
-* `npm run build` builds the project - this builds assets, HTML, JS, and CSS into `dist`
-* `npm run build:assets` copies the files in the `src/assets/` directory into `dist`
-* `npm run build:pug` compiles the Pug located in the `src/pug/` directory into `dist`
-* `npm run build:scripts` brings the `src/js/scripts.js` file into `dist`
-* `npm run build:scss` compiles the SCSS files located in the `src/scss/` directory into `dist`
-* `npm run clean` deletes the `dist` directory to prepare for rebuilding the project
-* `npm run start:debug` runs the project in debug mode
-* `npm start` or `npm run start` runs the project, launches a live preview in your default browser, and watches for changes made to files in `src`
-
-You must have npm installed in order to use this build environment.
-
-## Bugs and Issues
-
-Have a bug or an issue with this template? [Open a new issue](https://github.com/StartBootstrap/startbootstrap-sb-admin/issues) here on GitHub or leave a comment on the [template overview page at Start Bootstrap](https://startbootstrap.com/template/sb-admin/).
-
-## Custom Builds
-
-You can hire Start Bootstrap to create a custom build of any template, or create something from scratch using Bootstrap. For more information, visit the **[custom design services page](https://startbootstrap.com/bootstrap-design-services/)**.
-
-## About
-
-Start Bootstrap is an open source library of free Bootstrap templates and themes. All of the free templates and themes on Start Bootstrap are released under the MIT license, which means you can use them for any purpose, even for commercial projects.
-
-* <https://startbootstrap.com>
-* <https://twitter.com/SBootstrap>
-
-Start Bootstrap was created by and is maintained by **[David Miller](https://davidmiller.io/)**.
-
-* <https://davidmiller.io>
-* <https://twitter.com/davidmillerhere>
-* <https://github.com/davidtmiller>
-
-Start Bootstrap is based on the [Bootstrap](https://getbootstrap.com/) framework created by [Mark Otto](https://twitter.com/mdo) and [Jacob Thorton](https://twitter.com/fat).
-
-## Copyright and License
-
-Copyright 2013-2021 Start Bootstrap LLC. Code released under the [MIT](https://github.com/StartBootstrap/startbootstrap-sb-admin/blob/master/LICENSE) license.
+        # Schema Definition
+        schema_config:
+          mode: "auto_detect"        # 'auto_detect' (BQ decides) or 'explicit' (User defines)
+          fields: []                 # If mode is 'explicit', define fields like:
+                                     # - {name: "id", type: "INTEGER"}
