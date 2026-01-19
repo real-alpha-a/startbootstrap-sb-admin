@@ -13,18 +13,17 @@ from dateutil import parser
 from google.api_core.exceptions import NotFound
 from google.cloud import bigquery, storage
 from google.cloud.storage.blob import Blob
-from commons.bq_utils import create_or_update_table
-from commons.file_converter import FileUtils
-from commons.gcs_helper import GCSHelper
-from utils.auditor import get_auditor
-from utils.config_manager import config  # Assuming config object is exported
-from utils.excel_utils import process_grouped_headers
+from xlsx_processor.commons.bq_utils import create_or_update_table
+from xlsx_processor.commons.file_converters import FileUtils
+from xlsx_processor.commons.gcs_helper import GCSHelper
+from xlsx_processor.utils.auditor import get_auditor
+from xlsx_processor.utils.config_manager import config  # Assuming config object is exported
+
 
 
 
 BASE_DIR = Path(__file__).resolve().parent
 
-# Global Metadata
 META_FIELDS_TYPES = {
     'bq_load_timestamp': 'DATETIME',
     'bq_update_timestamp': 'DATETIME',
@@ -134,7 +133,7 @@ class FileProcessor:
     def _load_file_to_land_dataset(self,csv_file_path,land_table_name,schema, write_mode):
 
         land_load_summary = {}
-        schema_details = create_or_update_table(client=self.bq_client,table_ref=land_table_name,schema=schema)
+        _, schema_details = create_or_update_table(client=self.bq_client,table_ref=land_table_name,schema=schema)
 
         new_record_cnt = self._upload_file_to_bq(
             table_ref=land_table_name,
@@ -267,13 +266,13 @@ class FileProcessor:
         sheet_name: str,
         is_header_missing: bool = False, 
         header_row: int = 0,
-        data_start_row: int = 1,
-        data_end_row: Optional[int] = None, 
+        data_start: int = 1,
+        data_end: Optional[int] = None, 
         ordered_header: Optional[List[str]] = None, 
         column_mapping: Optional[Dict[str, str]] = None,
         usecols: Optional[Union[str, List[int]]] = None,
         skip_footer: int = 0, 
-        schema_config = None,
+        schema_config = None
     ) -> Optional[str]:
         """
         Converts an Excel sheet to CSV with parsing options.
@@ -294,21 +293,21 @@ class FileProcessor:
         skip_rows_arg = None
 
         if is_header_missing:
-            # Skip everything up to data start if data_start_row > 0
-            if data_start_row > 0:
-                skip_rows_arg = data_start_row
+            # Skip everything up to data start if data_start > 0
+            if data_start > 0:
+                skip_rows_arg = data_start
         else:
             # Consider the gap between header and data start row
             gap_start = header_row + 1
-            gap_end = data_start_row
+            gap_end = data_start
 
             if gap_end > gap_start:
                 skip_rows_arg = range(gap_start, gap_end)
 
         # Setup 'nrows' (Data End)
         pd_nrows = None
-        if data_end_row is not None:
-            pd_nrows = data_end_row - data_start_row
+        if data_end is not None:
+            pd_nrows = data_end - data_start
 
             if skip_footer > 0:
                 print(f"Warning: 'data_end' is set, so 'skip_footer' ({skip_footer}) will be ignored.")
@@ -412,7 +411,7 @@ class FileProcessor:
 
 
         return {
-            'status' : 'success',
+            'status': 'success',
             'csv_path': str(csv_full_path),
             'bq_schema': schema,
             'rows': df.shape[0],
@@ -439,12 +438,12 @@ class FileProcessor:
             sheet_name=sheet_identifier,
             is_header_missing=rules.get('is_header_missing', False),
             header_row = rules.get('header_row', 0),
-            data_start_row = rules.get('data_start', 1),
-            data_end_row= rules.get('data_end', None), 
+            data_start = rules.get('data_start', 1),
+            data_end= rules.get('data_end', None), 
             ordered_header = rules.get('ordered_header', None), 
             column_mapping = rules.get('column_mapping', None),
             usecols = rules.get('usecols', None),
-            skip_footer = rules.get('skip_footer', None), 
+            skip_footer = rules.get('skip_footer', 0), 
             schema_config = destination['layers']['land']['schema']
         )
 
@@ -459,8 +458,8 @@ class FileProcessor:
         load_summary = {}
         load_summary["sheetname"] = sheet_identifier
 
-        load_summary["total_rows"] = result["rows"]
-        load_summary["total_cols"] = result["cols"]
+        load_summary["total_rows"] = result['rows']
+        load_summary["total_cols"] = result['cols']
 
 
         sheet_load_summary = {
@@ -481,8 +480,7 @@ class FileProcessor:
 
 
 
-
-        return land_load_summary
+        return sheet_load_summary
     
     def _process_file(self, file_blob, job_entry):
         xlsx_paths = self.gcs_helper._get_xlsx_from_blob(file_blob)
@@ -573,7 +571,7 @@ def run_job(bq_client, gcs_client, job_id, job_entry, auditor):
         start_time = datetime.now(timezone.utc)
 
         print(f"\u23f3 Processing file {i+1}/{len(files_to_process)} - {file_name} ")
-        if config.skip_if_exits and auditor._is_file_processed(file_name):
+        if config.skip_if_exists and auditor._is_file_processed(file_name):
             auditor._update_to_skipped(file_name=file_name,error=auditor.SKIP_REASONS['already_processed'])
             print(f"Skipping {file_name}: Already processed.")
             process_status = 'skipped'
@@ -581,14 +579,14 @@ def run_job(bq_client, gcs_client, job_id, job_entry, auditor):
         else:
             try:
                 auditor._update_to_processing(file_name)
-                processing_summary = processor.process_file(blob, job_entry)
+                processing_summary = processor._process_file(blob, job_entry)
                 transactionLog["details"] = processing_summary
                 auditor._update_to_completed(file_name, start_time, json.dumps(processing_summary))
                 process_status = 'success'
             except Exception as e:
                 logger.error(f"Failed to process {file_name}: {e}")
                 process_status = 'failed'
-                auditor._update_to_failed(file_name, start_time, str(e))
+                auditor._update_to_failed(file_name, start_time, str(e), None)
         
         handle_post_processing(
             gcs_client=gcs_client, 
