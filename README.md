@@ -19,11 +19,7 @@ from xlsx_processor.commons.gcs_helper import GCSHelper
 from xlsx_processor.utils.auditor import get_auditor
 from xlsx_processor.utils.config_manager import config  # Assuming config object is exported
 
-
-
-
 BASE_DIR = Path(__file__).resolve().parent
-
 META_FIELDS_TYPES = {
     'bq_load_timestamp': 'DATETIME',
     'bq_update_timestamp': 'DATETIME',
@@ -37,9 +33,7 @@ debug_mode = run_env == "local"
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG if debug_mode else logging.INFO)
 
-
 def get_file_list(gcs_client, input_config) -> list:
-    
     bucket_name = input_config['bucket']
     match_type = input_config['file_selector']['match_type']
     pattern = input_config['file_selector']['pattern']
@@ -48,7 +42,6 @@ def get_file_list(gcs_client, input_config) -> list:
 
     gcs_helper = GCSHelper(gcs_client=gcs_client)
     files = gcs_helper._list_blobs(bucket_name=bucket_name, prefix=prefix, extensions=supported_formats)
-
     matched_files = []
 
     if match_type == 'regex':
@@ -60,12 +53,10 @@ def get_file_list(gcs_client, input_config) -> list:
         for file in files:
             if regex.search(file.name):
                 matched_files.append(file)
-    
     if match_type == 'name':
         for file in files:
             if file.name == pattern:
                 matched_files.append(file)
-
 
     sorted_files =  sorted(matched_files, key=lambda b: b.name)
     return sorted_files
@@ -78,12 +69,9 @@ def handle_post_processing(
     archive_config: dict = None
 ):
     action = archive_config.get('action', 'none')
-    
     if action == 'none':
         print(f"Post processing action is none. Blob {blob.name} left untouched.")
         return 'SKIPPED'
-
-
 
     if action == 'delete':
         try:
@@ -94,8 +82,7 @@ def handle_post_processing(
             print(f"Blob already deleted: {blob.name}")
             return 'ALREADY DELETED'
         except Exception as e:
-            print(f"Failed to delete blob {blob.name}: {e}")
-            raise
+            raise(f"Failed to delete blob {blob.name}: {e}")
 
     if action == 'archive':
         archive_path = archive_config.get('archive_path')
@@ -109,9 +96,7 @@ def handle_post_processing(
                 print(f"Archived file to: {archive_path_complete}")
                 return 'ARCHIVED'
         except Exception as e:
-            print(f"Failed to archive blob {blob.name}: {e}")
-            raise
-
+            raise(f"Failed to archive blob {blob.name}: {e}")
 
 class FileProcessor:
 
@@ -131,132 +116,31 @@ class FileProcessor:
             raise ValueError(f"No valid date found in filename: {file_name}")
         
     def _load_file_to_land_dataset(self,csv_file_path,land_table_name,schema, write_mode):
-
         land_load_summary = {}
         _, schema_details = create_or_update_table(client=self.bq_client,table_ref=land_table_name,schema=schema)
 
-        new_record_cnt = self._upload_file_to_bq(
+        schema_details["num_new_records_added"] = self._upload_file_to_bq(
             table_ref=land_table_name,
             schema=schema,
             file_path=csv_file_path,
             write_mode = write_mode
         )
-
-        schema_details["num_new_records_added"] = new_record_cnt
         land_load_summary['schema'] = schema_details
-
         return land_load_summary
 
-
     def _clean_bq_header(self, header: str) -> str:
-        
-        
-        
-        
-        
-        
-        
         if not header:
             return "col_unknown"
         
         # Lowercase and replace special chars
         clean = re.sub(r'[^0-9a-zA-Z_]', '_', str(header).strip().lower())
-
         # Replace multiple underscores
         clean = re.sub(r'_+', '_', clean).strip('_')
-        
-        
-        
-        
+
         if clean and clean[0].isdigit():
             clean = f"_{clean}"
-
-
-
-
-
-
   
         return clean[:300] if clean else "col_unknown"
-
-    
-
-    
-
- 
-
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     def _convert_excel_to_csv(
         self, 
@@ -308,13 +192,9 @@ class FileProcessor:
         pd_nrows = None
         if data_end is not None:
             pd_nrows = data_end - data_start
-
             if skip_footer > 0:
                 print(f"Warning: 'data_end' is set, so 'skip_footer' ({skip_footer}) will be ignored.")
                 skip_footer = 0
-
-        # 3. Read Excel File
-
 
         try:
             if sheet_identifier_type == "index":
@@ -340,7 +220,7 @@ class FileProcessor:
                 'reason': f"Skipped generating CSV for sheet: {sheet_name}. Reason: Sheet is empty."
             }
             
-         # Apply Ordered Header (if missing)
+         # Apply Ordered Header (if headers missing)
         if is_header_missing and ordered_header:
             if len(ordered_header) != len(df.columns):
                 raise ValueError(
@@ -349,7 +229,7 @@ class FileProcessor:
                 )
             df.columns = ordered_header
 
-
+         # Apply column mapping 
         if column_mapping:
             missing_keys = [k for k in column_mapping.keys() if k not in df.columns]
             if missing_keys:
@@ -358,15 +238,16 @@ class FileProcessor:
                     del column_mapping[k]
             df.rename(columns=column_mapping, inplace=True)
 
-        
-        # 4. Add Metadata
+        # Add Metadata
         load_time = datetime.now().isoformat()
         df['bq_load_timestamp'] = pd.to_datetime(load_time)
         df['meta_file_name'] = excel_filename
         df['meta_file_date'] = pd.to_datetime(str(self._parse_metafile_date(excel_filename)))
 
         schema = []
-        fields_map = {str(f['name']).lower(): f for f in schema_config.get("fields", [])}
+        fields_map = {}
+        if schema_config:
+            fields_map = {str(f['name']).lower(): f for f in schema_config.get("fields", [])}
 
         seen_cols = {}
         for col in df.columns:
@@ -409,7 +290,6 @@ class FileProcessor:
                 quoting=1
             )
 
-
         return {
             'status': 'success',
             'csv_path': str(csv_full_path),
@@ -418,19 +298,12 @@ class FileProcessor:
             'cols': df.shape[1]
         }
 
-
     def _process_sheet(self, xlsx_path, job_id, sheet_identifier):
-
-
-
         sheet_ctx = self.config.get_sheet_config(job_id, sheet_identifier)
         print(f"Using following parsing rules for job: {job_id}, rules: {sheet_ctx}")
         rules = sheet_ctx['parsing_rules']
         destination = sheet_ctx['destination']
         
-        
-
-
         result = self._convert_excel_to_csv(
             excel_path=xlsx_path,
             output_dir=os.path.dirname(xlsx_path),
@@ -450,36 +323,25 @@ class FileProcessor:
         if result['status'] == 'skipped':
             print(result['reason'])
             return
-        
-
-
-
-
+            
         load_summary = {}
         load_summary["sheetname"] = sheet_identifier
-
         load_summary["total_rows"] = result['rows']
         load_summary["total_cols"] = result['cols']
-
 
         sheet_load_summary = {
             "sheet_name": os.path.basename(result['csv_path'])
         }
 
         land_table = f"{self.config.project_id}.{destination['layers']['land']['dataset']}.{destination['layers']['land']['table']}"
-        land_load_summary = self._load_file_to_land_dataset(
+        sheet_load_summary['land']  = self._load_file_to_land_dataset(
             csv_file_path=result['csv_path'], 
             land_table_name=land_table,
             schema=result['bq_schema'],
             write_mode=destination['layers']['land']['write_mode']
         )
-        
 
-        sheet_load_summary['land'] = land_load_summary
         FileUtils.delete_file(result['csv_path'])
-
-
-
         return sheet_load_summary
     
     def _process_file(self, file_blob, job_entry):
@@ -489,26 +351,19 @@ class FileProcessor:
         file_summary = {
             'filename': os.path.basename(xlsx_path)
         }
-        
         job_id = job_entry.get('job_id')
-        
         sheets = job_entry.get('sheets', [])
         summaries = []
         for sheet in sheets:
-
             summary = self._process_sheet(xlsx_path, job_id, sheet['sheet_identifier'])
             summaries.append(summary)
 
-
-
         file_summary['sheets'] = summaries    
         FileUtils.delete_file(xlsx_path)
-
+        
         return file_summary
     
-
     def _upload_file_to_bq(self, table_ref, file_path, schema, write_mode):
-
         job_config = bigquery.LoadJobConfig(
             source_format=bigquery.SourceFormat.CSV,
             skip_leading_rows=1,
@@ -529,7 +384,6 @@ def print_separator(separator):
     print(f"{separator*80}")
 
 def run_job(bq_client, gcs_client, job_id, job_entry, auditor):
-
     try:
         job_ctx = config.get_job_config(job_id)
     except ValueError as e:
@@ -545,14 +399,12 @@ def run_job(bq_client, gcs_client, job_id, job_entry, auditor):
     print_separator("=")
 
     files_to_process = get_file_list(gcs_client, job_ctx)
-
     if not files_to_process:
         print(f"No files found for job: {job_id}")
         return
     
     auditor._update_status_to_queued(file.name.split("/")[-1] for file in files_to_process)
     print(f"Total files to process: {len(files_to_process)} under job: {job_id}. Starting processing with Run ID: {auditor.run_id}")
-    
 
     processor = FileProcessor(
         bq_client=bq_client,
@@ -602,25 +454,19 @@ def run_job(bq_client, gcs_client, job_id, job_entry, auditor):
         
         print(f"File: {file_name} has been processed successfully.")
 
-
 def main(bq_client, gcs_client):
-    
-
-
-
+    print("\n --- Pipeline Run Started ---")
     all_jobs = config._config_data.get('jobs', [])
 
     if not all_jobs:
-        print("No jobs found in configuration! Consider checking ingestion config.")
+        print("No jobs found in configuration! Consider adding job(s) in ingestion config.")
         sys.exit()
+
     audit_config = config.get_audit_config()
     audit_table = f"{config.project_id}.{audit_config['dataset']}.{audit_config['table']}"
-    auditor = get_auditor(
-        bq_client=bq_client, 
-        table_ref=audit_table )
+    auditor = get_auditor(bq_client=bq_client, table_ref=audit_table )
 
     for job_entry in all_jobs:
-        
         
         run_job(
             bq_client=bq_client, 
@@ -630,23 +476,15 @@ def main(bq_client, gcs_client):
             auditor=auditor
         )
     
-
     print("\n --- Pipeline Run Complete ---")
 
-
 def xlsx_file_ingestion(project_name):
-
     bq_client = bigquery.Client(project=project_name)
     gcs_client = storage.Client(project=project_name)
     main(bq_client=bq_client, gcs_client=gcs_client)
 
 # --- Independent Execution Block ---
 if __name__ == "__main__":
-
-
-
-
-
     try:
         print("Running utility independently...")
         xlsx_file_ingestion(config.project_id)
