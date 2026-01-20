@@ -1,10 +1,9 @@
-
-
 import json
 import logging
 import os
 import re
 import sys
+from enum import Enum
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Literal, Optional, Union
@@ -17,7 +16,7 @@ from xlsx_processor.commons.bq_utils import create_or_update_table
 from xlsx_processor.commons.file_converters import FileUtils
 from xlsx_processor.commons.gcs_helper import GCSHelper
 from xlsx_processor.utils.auditor import get_auditor
-from xlsx_processor.utils.config_manager import config  # Assuming config object is exported
+from xlsx_processor.utils.config_manager import config  
 
 BASE_DIR = Path(__file__).resolve().parent
 META_FIELDS_TYPES = {
@@ -61,42 +60,13 @@ def get_file_list(gcs_client, input_config) -> list:
     sorted_files =  sorted(matched_files, key=lambda b: b.name)
     return sorted_files
 
-def handle_post_processing(
-    gcs_client, 
-    blob: Blob,
-    status: Literal["success", "failed", "skipped"] = "skipped", 
-    archive_bucket_name: str = None, 
-    archive_config: dict = None
-):
-    action = archive_config.get('action', 'none')
-    if action == 'none':
-        print(f"Post processing action is none. Blob {blob.name} left untouched.")
-        return 'SKIPPED'
-
-    if action == 'delete':
-        try:
-            blob.delete()
-            print(f"Deleted blob: {blob.name}")
-            return 'DELETED'
-        except NotFound:
-            print(f"Blob already deleted: {blob.name}")
-            return 'ALREADY DELETED'
-        except Exception as e:
-            raise(f"Failed to delete blob {blob.name}: {e}")
-
-    if action == 'archive':
-        archive_path = archive_config.get('archive_path')
-        try:
-            if blob.exists():
-                archive_path_complete = f"{archive_path}/{status}/{str(blob.name).split("/")[-1]}"
-                bucket = gcs_client.bucket(archive_bucket_name)
-                archive_blob = bucket.blob(archive_path_complete)
-                archive_blob.rewrite(blob)
-                blob.delete()
-                print(f"Archived file to: {archive_path_complete}")
-                return 'ARCHIVED'
-        except Exception as e:
-            raise(f"Failed to archive blob {blob.name}: {e}")
+class ProcessingStatus:
+    SUCCESS = "SUCCESS"
+    FAILED = "FAILED"
+    PARTIAL_SUCCESS = "PARTIAL_SUCCESS"
+    SKIPPED = "SKIPPED"
+    NOT_STARTED = "NOT_STARTED"
+    NOT_PROCESSED = "NOT_PROCESSED"
 
 class FileProcessor:
 
@@ -116,17 +86,15 @@ class FileProcessor:
             raise ValueError(f"No valid date found in filename: {file_name}")
         
     def _load_file_to_land_dataset(self,csv_file_path,land_table_name,schema, write_mode):
-        land_load_summary = {}
         _, schema_details = create_or_update_table(client=self.bq_client,table_ref=land_table_name,schema=schema)
 
-        schema_details["num_new_records_added"] = self._upload_file_to_bq(
+        schema_details["bq_rows_added"] = self._upload_file_to_bq(
             table_ref=land_table_name,
             schema=schema,
             file_path=csv_file_path,
             write_mode = write_mode
         )
-        land_load_summary['schema'] = schema_details
-        return land_load_summary
+        return schema_details
 
     def _clean_bq_header(self, header: str) -> str:
         if not header:
@@ -157,7 +125,7 @@ class FileProcessor:
         usecols: Optional[Union[str, List[int]]] = None,
         skip_footer: int = 0, 
         schema_config = None
-    ) -> Optional[str]:
+    ) -> Optional[Dict[str, str]]:
         """
         Converts an Excel sheet to CSV with parsing options.
         """
@@ -212,11 +180,14 @@ class FileProcessor:
                 dtype=str
             )
         except Exception as e:
-            raise ValueError(f"Error reading Excel sheet '{sheet_name}': {e}")
+            return {
+                'status': ProcessingStatus.FAILED,
+                'reason': f"Error reading Excel sheet '{sheet_name}': {e}"
+            }
 
         if df.empty or all(df[col].isna().all() for col in df.columns):
             return {
-                'status': 'skipped',
+                'status': ProcessingStatus.SKIPPED,
                 'reason': f"Skipped generating CSV for sheet: {sheet_name}. Reason: Sheet is empty."
             }
             
@@ -291,7 +262,7 @@ class FileProcessor:
             )
 
         return {
-            'status': 'success',
+            'status': ProcessingStatus.SUCCESS,
             'csv_path': str(csv_full_path),
             'bq_schema': schema,
             'rows': df.shape[0],
@@ -300,7 +271,6 @@ class FileProcessor:
 
     def _process_sheet(self, xlsx_path, job_id, sheet_identifier):
         sheet_ctx = self.config.get_sheet_config(job_id, sheet_identifier)
-        print(f"Using following parsing rules for job: {job_id}, rules: {sheet_ctx}")
         rules = sheet_ctx['parsing_rules']
         destination = sheet_ctx['destination']
         
@@ -320,37 +290,34 @@ class FileProcessor:
             schema_config = destination['layers']['land']['schema']
         )
 
-        if result['status'] == 'skipped':
-            print(result['reason'])
-            return
-            
-        load_summary = {}
-        load_summary["sheetname"] = sheet_identifier
-        load_summary["total_rows"] = result['rows']
-        load_summary["total_cols"] = result['cols']
+        if result['status'] == ProcessingStatus.SKIPPED:
+            print(f"Skipped processing sheet: {sheet_identifier}, reason: {result['reason']}")
+            return {
+                'status': ProcessingStatus.SKIPPED,
+                'reason': result['reason']
+            }
+        else:      
+            land_table = f"{self.config.project_id}.{destination['layers']['land']['dataset']}.{destination['layers']['land']['table']}"
+            schema_details  = self._load_file_to_land_dataset(
+                csv_file_path=result['csv_path'], 
+                land_table_name=land_table,
+                schema=result['bq_schema'],
+                write_mode=destination['layers']['land']['write_mode']
+            )
+            FileUtils.delete_file(result['csv_path'])
 
-        sheet_load_summary = {
-            "sheet_name": os.path.basename(result['csv_path'])
-        }
-
-        land_table = f"{self.config.project_id}.{destination['layers']['land']['dataset']}.{destination['layers']['land']['table']}"
-        sheet_load_summary['land']  = self._load_file_to_land_dataset(
-            csv_file_path=result['csv_path'], 
-            land_table_name=land_table,
-            schema=result['bq_schema'],
-            write_mode=destination['layers']['land']['write_mode']
-        )
-
-        FileUtils.delete_file(result['csv_path'])
-        return sheet_load_summary
+            return {
+                'status': ProcessingStatus.SUCCESS,
+                'sheet_name': sheet_identifier,
+                'rows': result['rows'],
+                'cols': result['cols'],
+                'destination': schema_details
+            }
     
-    def _process_file(self, file_blob, job_entry):
+    def process_file(self, file_blob, job_entry):
         xlsx_paths = self.gcs_helper._get_xlsx_from_blob(file_blob)
         xlsx_path = xlsx_paths[0]
         
-        file_summary = {
-            'filename': os.path.basename(xlsx_path)
-        }
         job_id = job_entry.get('job_id')
         sheets = job_entry.get('sheets', [])
         summaries = []
@@ -358,10 +325,28 @@ class FileProcessor:
             summary = self._process_sheet(xlsx_path, job_id, sheet['sheet_identifier'])
             summaries.append(summary)
 
-        file_summary['sheets'] = summaries    
         FileUtils.delete_file(xlsx_path)
+
+        processed = [s for s in summaries if s.get('status') != ProcessingStatus.SKIPPED]
+        success_count = sum(1 for s in summaries if s.get('status') == ProcessingStatus.SUCCESS)
+        total_count = len(processed)
+
+        final_status = None
+        if not processed:
+            final_status = ProcessingStatus.NOT_PROCESSED
+        elif success_count == total_count:
+            final_status = ProcessingStatus.SUCCESS
+        elif success_count == 0:
+            final_status = ProcessingStatus.FAILED
+        else: 
+            final_status = ProcessingStatus.PARTIAL_SUCCESS
+
         
-        return file_summary
+        return {
+            'status': final_status,
+            'filename': os.path.basename(xlsx_path),
+            'sheets': summaries
+        }
     
     def _upload_file_to_bq(self, table_ref, file_path, schema, write_mode):
         job_config = bigquery.LoadJobConfig(
@@ -377,8 +362,46 @@ class FileProcessor:
             load_job = self.bq_client.load_table_from_file(f, table_ref, job_config=job_config)
 
         load_job.result()
-        logger.debug(f"{load_job.output_rows} record(s) inserted to table: {table_ref}")
+        print(f"{load_job.output_rows} record(s) inserted to table: {table_ref}")
         return load_job.output_rows
+    
+    def handle_post_processing(
+        self,
+        gcs_client, 
+        blob: Blob,
+        status: Literal["success", "failed", "skipped"] = "skipped", 
+        archive_bucket_name: str = None, 
+        archive_config: dict = None
+    ):
+        action = archive_config.get('action', 'none')
+        if action == 'none':
+            print(f"Post processing action is none. Blob {blob.name} left untouched.")
+            return 'SKIPPED'
+
+        if action == 'delete':
+            try:
+                blob.delete()
+                print(f"Deleted blob: {blob.name}")
+                return 'DELETED'
+            except NotFound:
+                print(f"Blob already deleted: {blob.name}")
+                return 'ALREADY DELETED'
+            except Exception as e:
+                raise(f"Failed to delete blob {blob.name}: {e}")
+
+        if action == 'archive':
+            archive_path = archive_config.get('archive_path')
+            try:
+                if blob.exists():
+                    archive_path_complete = f"{archive_path}/{status}/{str(blob.name).split("/")[-1]}"
+                    bucket = gcs_client.bucket(archive_bucket_name)
+                    archive_blob = bucket.blob(archive_path_complete)
+                    archive_blob.rewrite(blob)
+                    blob.delete()
+                    print(f"Archived file to: {archive_path_complete}")
+                    return 'ARCHIVED'
+            except Exception as e:
+                raise(f"Failed to archive blob {blob.name}: {e}")
 
 def print_separator(separator):
     print(f"{separator*80}")
@@ -387,11 +410,11 @@ def run_job(bq_client, gcs_client, job_id, job_entry, auditor):
     try:
         job_ctx = config.get_job_config(job_id)
     except ValueError as e:
-        print(f"!! ERROR loading Job {job_id}: {e}")
-        return
+        auditor._update_to_failed(file_name, start_time, f'Failed to load job config for job_id: {job_id}', None)
+        return ProcessingStatus.FAILED
     
     print_separator("=")
-    print(f"\nJOB ID: {job_id}")
+    print(f"Job Id: {job_id}")
     print(f"Description: {job_ctx['description']}")
     print(f"Source Bucket: {job_ctx['bucket']}")
     print(f"File Pattern: {job_ctx['file_selector']['pattern']}")
@@ -401,7 +424,7 @@ def run_job(bq_client, gcs_client, job_id, job_entry, auditor):
     files_to_process = get_file_list(gcs_client, job_ctx)
     if not files_to_process:
         print(f"No files found for job: {job_id}")
-        return
+        return ProcessingStatus.SKIPPED
     
     auditor._update_status_to_queued(file.name.split("/")[-1] for file in files_to_process)
     print(f"Total files to process: {len(files_to_process)} under job: {job_id}. Starting processing with Run ID: {auditor.run_id}")
@@ -412,49 +435,58 @@ def run_job(bq_client, gcs_client, job_id, job_entry, auditor):
         config_inst= config
     )
 
+    results = []
     for i, blob in enumerate(files_to_process):
         process_status = None
         file_name = blob.name.split("/")[-1]
         start_time = datetime.now(timezone.utc)
-        
-        global transactionLog
-        transactionLog = {}
-        transactionLog['file_name'] = file_name
-        start_time = datetime.now(timezone.utc)
-
+        processing_summary = None
+        skip_reason = None
         print(f"\u23f3 Processing file {i+1}/{len(files_to_process)} - {file_name} ")
         if config.skip_if_exists and auditor._is_file_processed(file_name):
-            auditor._update_to_skipped(file_name=file_name,error=auditor.SKIP_REASONS['already_processed'])
             print(f"Skipping {file_name}: Already processed.")
-            process_status = 'skipped'
-            continue
+            process_status = ProcessingStatus.SKIPPED
+            skip_reason = auditor.SKIP_REASONS['already_processed']
         else:
             try:
                 auditor._update_to_processing(file_name)
-                processing_summary = processor._process_file(blob, job_entry)
-                transactionLog["details"] = processing_summary
-                auditor._update_to_completed(file_name, start_time, json.dumps(processing_summary))
-                process_status = 'success'
+                processing_summary = processor.process_file(blob, job_entry)
+                process_status = processing_summary['status']
             except Exception as e:
                 logger.error(f"Failed to process {file_name}: {e}")
-                process_status = 'failed'
-                auditor._update_to_failed(file_name, start_time, str(e), None)
+                process_status = ProcessingStatus.FAILED
         
-        handle_post_processing(
-            gcs_client=gcs_client, 
-            blob=blob, 
-            status=process_status, 
-            archive_bucket_name=job_ctx['bucket'], 
-            archive_config=job_ctx.get('post_processing', {})
+        processor.handle_post_processing(
+            gcs_client=gcs_client,
+            blob=blob,
+            status=process_status,
+            archive_bucket_name=job_ctx['bucket'],
+            archive_config=job_ctx.get('post_processing',{})
         )
+            
+        if process_status in [ProcessingStatus.SUCCESS, ProcessingStatus.PARTIAL_SUCCESS]:
+            auditor._update_to_completed(file_name, start_time, json.dumps(processing_summary))
 
-        if process_status == 'failed' and not config.continue_on_error:
-            auditor._clear_current_queued_processing_records()
-            sys.exit()
-        
+        if process_status == ProcessingStatus.SKIPPED:
+            auditor._update_to_skipped(file_name=file_name,error=skip_reason)
+
+        if process_status == ProcessingStatus.FAILED:
+            auditor._update_to_failed(file_name, start_time, str(e), None)
+
+            if not config.continue_on_error:
+                auditor._clear_current_queued_processing_records()
+                sys.exit()
+
+        results.append({
+            'filename': file_name,
+            'status': process_status
+        })            
         print(f"File: {file_name} has been processed successfully.")
 
-def main(bq_client, gcs_client):
+    return results
+
+
+def run_pipeline(bq_client, gcs_client):
     print("\n --- Pipeline Run Started ---")
     all_jobs = config._config_data.get('jobs', [])
 
@@ -466,22 +498,24 @@ def main(bq_client, gcs_client):
     audit_table = f"{config.project_id}.{audit_config['dataset']}.{audit_config['table']}"
     auditor = get_auditor(bq_client=bq_client, table_ref=audit_table )
 
+    results = {}
     for job_entry in all_jobs:
-        
-        run_job(
+        result = run_job(
             bq_client=bq_client, 
             gcs_client=gcs_client, 
             job_id=job_entry['job_id'], 
             job_entry=job_entry, 
             auditor=auditor
         )
-    
+        results[job_entry['job_id']] = result
+
+    print(results)
     print("\n --- Pipeline Run Complete ---")
 
 def xlsx_file_ingestion(project_name):
     bq_client = bigquery.Client(project=project_name)
     gcs_client = storage.Client(project=project_name)
-    main(bq_client=bq_client, gcs_client=gcs_client)
+    run_pipeline(bq_client=bq_client, gcs_client=gcs_client)
 
 # --- Independent Execution Block ---
 if __name__ == "__main__":
