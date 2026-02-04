@@ -1,75 +1,47 @@
-# [Start Bootstrap - SB Admin](https://startbootstrap.com/template/sb-admin/)
+from google.cloud import storage
+from google.api_core.exceptions import NotFound, Forbidden, GoogleAPICallError
+from pathlib import Path
+import os
 
-[SB Admin](https://startbootstrap.com/template/sb-admin/) is an open source, admin dashboard template for [Bootstrap](https://getbootstrap.com/) created by [Start Bootstrap](https://startbootstrap.com/).
+def download_gcs_file_safe(gcs_url: str, local_dir: str = "/tmp") -> str:
+    """
+    Downloads a file from GCS and returns the local file path.
+    Raises meaningful exceptions for common failure scenarios.
+    """
+    if not gcs_url.startswith("gs://"):
+        raise ValueError("Invalid GCS URL. Must start with 'gs://'")
 
-## Preview
+    try:
+        _, path = gcs_url.split("gs://", 1)
+        bucket_name, blob_name = path.split("/", 1)
 
-[![SB Admin Preview](https://assets.startbootstrap.com/img/screenshots/templates/sb-admin.png)](https://startbootstrap.github.io/startbootstrap-sb-admin/)
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
 
-**[View Live Preview](https://startbootstrap.github.io/startbootstrap-sb-admin/)**
+        # Check bucket exists
+        if not bucket.exists():
+            raise FileNotFoundError(f"GCS bucket not found: {bucket_name}")
 
-## Status
+        blob = bucket.blob(blob_name)
 
-[![GitHub license](https://img.shields.io/badge/license-MIT-blue.svg)](https://raw.githubusercontent.com/StartBootstrap/startbootstrap-sb-admin/master/LICENSE)
-[![npm version](https://img.shields.io/npm/v/startbootstrap-sb-admin.svg)](https://www.npmjs.com/package/startbootstrap-sb-admin)
-[![dependencies Status](https://david-dm.org/StartBootstrap/startbootstrap-sb-admin/status.svg)](https://david-dm.org/StartBootstrap/startbootstrap-sb-admin)
-[![devDependencies Status](https://david-dm.org/StartBootstrap/startbootstrap-sb-admin/dev-status.svg)](https://david-dm.org/StartBootstrap/startbootstrap-sb-admin?type=dev)
+        # Check file exists
+        if not blob.exists():
+            raise FileNotFoundError(f"GCS file not found: gs://{bucket_name}/{blob_name}")
 
-## Download and Installation
+        Path(local_dir).mkdir(parents=True, exist_ok=True)
+        local_path = os.path.join(local_dir, os.path.basename(blob_name))
 
-To begin using this template, choose one of the following options to get started:
+        blob.download_to_filename(local_path)
+        return local_path
 
-* [Download the latest release on Start Bootstrap](https://startbootstrap.com/template/sb-admin/)
-* Install via npm: `npm i startbootstrap-sb-admin`
-* Clone the repo: `git clone https://github.com/StartBootstrap/startbootstrap-sb-admin.git`
-* [Fork, Clone, or Download on GitHub](https://github.com/StartBootstrap/startbootstrap-sb-admin)
+    except Forbidden:
+        raise PermissionError(f"Access denied to GCS bucket or file: {gcs_url}")
 
-## Usage
+    except NotFound:
+        raise FileNotFoundError(f"GCS resource not found: {gcs_url}")
 
-### Basic Usage
+    except GoogleAPICallError as e:
+        raise RuntimeError(f"GCS API error while accessing {gcs_url}: {e}")
 
-After downloading, simply edit the HTML and CSS files included with `dist` directory. These are the only files you need to worry about, you can ignore everything else! To preview the changes you make to the code, you can open the `index.html` file in your web browser.
-
-### Advanced Usage
-
-Clone the source files of the theme and navigate into the theme's root directory. Run `npm install` and then run `npm start` which will open up a preview of the template in your default browser, watch for changes to core template files, and live reload the browser when changes are saved. You can view the `package.json` file to see which scripts are included.
-
-#### npm Scripts
-
-* `npm run build` builds the project - this builds assets, HTML, JS, and CSS into `dist`
-* `npm run build:assets` copies the files in the `src/assets/` directory into `dist`
-* `npm run build:pug` compiles the Pug located in the `src/pug/` directory into `dist`
-* `npm run build:scripts` brings the `src/js/scripts.js` file into `dist`
-* `npm run build:scss` compiles the SCSS files located in the `src/scss/` directory into `dist`
-* `npm run clean` deletes the `dist` directory to prepare for rebuilding the project
-* `npm run start:debug` runs the project in debug mode
-* `npm start` or `npm run start` runs the project, launches a live preview in your default browser, and watches for changes made to files in `src`
-
-You must have npm installed in order to use this build environment.
-
-## Bugs and Issues
-
-Have a bug or an issue with this template? [Open a new issue](https://github.com/StartBootstrap/startbootstrap-sb-admin/issues) here on GitHub or leave a comment on the [template overview page at Start Bootstrap](https://startbootstrap.com/template/sb-admin/).
-
-## Custom Builds
-
-You can hire Start Bootstrap to create a custom build of any template, or create something from scratch using Bootstrap. For more information, visit the **[custom design services page](https://startbootstrap.com/bootstrap-design-services/)**.
-
-## About
-
-Start Bootstrap is an open source library of free Bootstrap templates and themes. All of the free templates and themes on Start Bootstrap are released under the MIT license, which means you can use them for any purpose, even for commercial projects.
-
-* <https://startbootstrap.com>
-* <https://twitter.com/SBootstrap>
-
-Start Bootstrap was created by and is maintained by **[David Miller](https://davidmiller.io/)**.
-
-* <https://davidmiller.io>
-* <https://twitter.com/davidmillerhere>
-* <https://github.com/davidtmiller>
-
-Start Bootstrap is based on the [Bootstrap](https://getbootstrap.com/) framework created by [Mark Otto](https://twitter.com/mdo) and [Jacob Thorton](https://twitter.com/fat).
-
-## Copyright and License
-
-Copyright 2013-2021 Start Bootstrap LLC. Code released under the [MIT](https://github.com/StartBootstrap/startbootstrap-sb-admin/blob/master/LICENSE) license.
+    except Exception as e:
+        raise RuntimeError(f"Unexpected error while downloading {gcs_url}: {e}")
