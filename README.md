@@ -2,10 +2,6 @@ import pandas as pd
 import re
 from typing import List
 
-import pandas as pd
-import re
-from typing import List
-
 
 def make_bq_compatible(column_name: str) -> str:
     column_name = column_name.lower().strip()
@@ -29,7 +25,20 @@ def merge_multi_group_headers(
     sheet_name: str = 0
 ) -> pd.DataFrame:
 
-    df_raw = pd.read_excel(file_path, header=None, sheet_name=sheet_name)
+    # Identify first relevant row
+    first_required_row = min(group_header_rows)
+
+    # Read only required portion
+    df_raw = pd.read_excel(
+        file_path,
+        header=None,
+        sheet_name=sheet_name,
+        skiprows=first_required_row
+    )
+
+    # Adjust row indexes because we skipped rows
+    adjusted_group_rows = [r - first_required_row for r in group_header_rows]
+    adjusted_header_row = header_row - first_required_row
 
     total_cols = df_raw.shape[1]
     final_columns = []
@@ -38,28 +47,27 @@ def merge_multi_group_headers(
     for col_idx in range(total_cols):
         parts = []
 
-        # Merge all group header rows
-        for row in group_header_rows:
+        # Merge group headers
+        for row in adjusted_group_rows:
             value = df_raw.iloc[row, col_idx]
             if pd.notna(value) and str(value).strip():
                 parts.append(str(value).strip())
 
         # Add actual header row
-        header_value = df_raw.iloc[header_row, col_idx]
+        header_value = df_raw.iloc[adjusted_header_row, col_idx]
         if pd.notna(header_value) and str(header_value).strip():
             parts.append(str(header_value).strip())
 
         combined = "_".join(parts)
         combined = make_bq_compatible(combined)
 
-        # If still empty → assign unnamed_x
         if not combined:
             combined = f"unnamed_{unnamed_counter}"
             unnamed_counter += 1
 
         final_columns.append(combined)
 
-    # Handle duplicates safely
+    # Handle duplicates
     seen = {}
     unique_columns = []
 
@@ -72,19 +80,8 @@ def merge_multi_group_headers(
             unique_columns.append(f"{col}_{seen[col]}")
 
     # Data starts after header row
-    df_final = df_raw.iloc[header_row + 1:].copy()
+    df_final = df_raw.iloc[adjusted_header_row + 1:].copy()
     df_final.columns = unique_columns
     df_final.reset_index(drop=True, inplace=True)
 
     return df_final
-
-
-if __name__ == "__main__":
-    df = merge_multi_group_headers(
-    file_path="/Users/atul/Downloads/Book1.xlsx",
-    group_header_rows=[0,1],
-    header_row=2
-)
-
-print(df.columns)
-print(df.head())
