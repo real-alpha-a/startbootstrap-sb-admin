@@ -1,2 +1,90 @@
-https://downloads.mongodb.com/compass/mongosh-2.6.0-win32-x64.zip
-https://downloads.mongodb.com/compass/mongodb-compass-1.49.1-win32-x64.zip
+import pandas as pd
+import re
+from typing import List
+
+import pandas as pd
+import re
+from typing import List
+
+
+def make_bq_compatible(column_name: str) -> str:
+    column_name = column_name.lower().strip()
+    column_name = re.sub(r"[^\w]", "_", column_name)
+    column_name = re.sub(r"_+", "_", column_name)
+    column_name = column_name.strip("_")
+
+    if not column_name:
+        return ""
+
+    if not re.match(r"^[a-zA-Z_]", column_name):
+        column_name = f"col_{column_name}"
+
+    return column_name[:300]
+
+
+def merge_multi_group_headers(
+    file_path: str,
+    group_header_rows: List[int],
+    header_row: int,
+    sheet_name: str = 0
+) -> pd.DataFrame:
+
+    df_raw = pd.read_excel(file_path, header=None, sheet_name=sheet_name)
+
+    total_cols = df_raw.shape[1]
+    final_columns = []
+    unnamed_counter = 0
+
+    for col_idx in range(total_cols):
+        parts = []
+
+        # Merge all group header rows
+        for row in group_header_rows:
+            value = df_raw.iloc[row, col_idx]
+            if pd.notna(value) and str(value).strip():
+                parts.append(str(value).strip())
+
+        # Add actual header row
+        header_value = df_raw.iloc[header_row, col_idx]
+        if pd.notna(header_value) and str(header_value).strip():
+            parts.append(str(header_value).strip())
+
+        combined = "_".join(parts)
+        combined = make_bq_compatible(combined)
+
+        # If still empty → assign unnamed_x
+        if not combined:
+            combined = f"unnamed_{unnamed_counter}"
+            unnamed_counter += 1
+
+        final_columns.append(combined)
+
+    # Handle duplicates safely
+    seen = {}
+    unique_columns = []
+
+    for col in final_columns:
+        if col not in seen:
+            seen[col] = 0
+            unique_columns.append(col)
+        else:
+            seen[col] += 1
+            unique_columns.append(f"{col}_{seen[col]}")
+
+    # Data starts after header row
+    df_final = df_raw.iloc[header_row + 1:].copy()
+    df_final.columns = unique_columns
+    df_final.reset_index(drop=True, inplace=True)
+
+    return df_final
+
+
+if __name__ == "__main__":
+    df = merge_multi_group_headers(
+    file_path="/Users/atul/Downloads/Book1.xlsx",
+    group_header_rows=[0,1],
+    header_row=2
+)
+
+print(df.columns)
+print(df.head())
